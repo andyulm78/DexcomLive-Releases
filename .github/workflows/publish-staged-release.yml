@@ -1,0 +1,55 @@
+name: Publish staged release
+
+# Publishes the exact, already signed files committed under release-staging/<tag>/
+# as a GitHub release of this public repository. The tag points at main's README commit.
+on:
+  push:
+    branches: [claude/project-thread-fwa72z]
+    paths: ['release-staging/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staged-release-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: v0.3.12
+      EXE: DexcomLive-v0.3.12-win-x64.exe
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify the four staged files
+        working-directory: release-staging/v0.3.12
+        run: |
+          set -euo pipefail
+          [ "$(ls -1 | sort | tr '\n' ' ')" = "$EXE SHA256SUMS.txt update-manifest.json update-manifest.sig " ]
+          sha256sum -c SHA256SUMS.txt
+          [ "$(stat -c %s update-manifest.sig)" = 64 ]
+          jq -e --arg exe "$EXE" --argjson size "$(stat -c %s "$EXE")" --arg sha "$(sha256sum "$EXE" | cut -d' ' -f1)" \
+            '.schema==1 and .repository=="andyulm78/DexcomLive" and .version=="0.3.12" and .assetName==$exe and .size==$size and .sha256==$sha' update-manifest.json
+      - name: Refuse to overwrite an existing release or tag
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "Release $TAG already exists"; exit 1; fi
+          if gh api "repos/$GH_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then echo "Tag $TAG already exists"; exit 1; fi
+      - name: Create release v0.3.12 on main
+        working-directory: release-staging/v0.3.12
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --target main --title "DexcomLive $TAG" \
+            --notes "Signierte Windows-x64-Version $TAG. SHA256 der EXE: $(cut -d' ' -f1 SHA256SUMS.txt)" \
+            "$EXE" SHA256SUMS.txt update-manifest.json update-manifest.sig
+      - name: Confirm published assets
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease,assets \
+            --jq '{tag: .tagName, draft: .isDraft, prerelease: .isPrerelease, assets: [.assets[] | {name, size, state, digest}]}'
+          [ "$(gh release view "$TAG" --json assets --jq '[.assets[] | select(.state=="uploaded")] | length')" = 4 ]
